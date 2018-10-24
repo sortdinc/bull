@@ -22,7 +22,7 @@ Promise.config({
 });
 
 describe('Queue', function() {
-  var sandbox = sinon.sandbox.create();
+  var sandbox = sinon.createSandbox();
   var client;
 
   beforeEach(function() {
@@ -1299,6 +1299,37 @@ describe('Queue', function() {
       });
     });
 
+    it('process a job that rejects with a nested error', function(done) {
+      var cause = new Error('cause');
+      var jobError = new Error('wrapper');
+      jobError.cause = function() {
+        return cause;
+      };
+
+      queue.process(function(job) {
+        expect(job.data.foo).to.be.equal('bar');
+        return Promise.reject(jobError);
+      });
+
+      queue.add({ foo: 'bar' }).then(
+        function(job) {
+          expect(job.id).to.be.ok;
+          expect(job.data.foo).to.be.eql('bar');
+        },
+        function(err) {
+          done(err);
+        }
+      );
+
+      queue.once('failed', function(job, err) {
+        expect(job.id).to.be.ok;
+        expect(job.data.foo).to.be.eql('bar');
+        expect(err).to.be.eql(jobError);
+        expect(err.cause()).to.be.eql(cause);
+        done();
+      });
+    });
+
     it('does not renew a job lock after the lock has been released [#397]', function(done) {
       this.timeout(queue.LOCK_RENEW_TIME * 4);
 
@@ -1948,6 +1979,46 @@ describe('Queue', function() {
       });
     });
 
+    it('should not retry a job if the custom backoff returns -1', function(done) {
+      queue = utils.buildQueue('test retries and backoffs', {
+        settings: {
+          backoffStrategies: {
+            custom: function() {
+              return -1;
+            }
+          }
+        }
+      });
+      var tries = 0;
+      queue.isReady().then(function() {
+        queue.process(function(job, jobDone) {
+          tries++;
+          if (job.attemptsMade < 3) {
+            throw new Error('Not yet!');
+          }
+          jobDone();
+        });
+
+        queue.add(
+          { foo: 'bar' },
+          {
+            attempts: 3,
+            backoff: {
+              type: 'custom'
+            }
+          }
+        );
+      });
+      queue.on('completed', function() {
+        done(new Error('Failed job was retried more than it should be!'));
+      });
+      queue.on('failed', function() {
+        if (tries === 1) {
+          done();
+        }
+      });
+    });
+
     it('should retry a job after a delay if a custom backoff is given based on the error thrown', function(done) {
       function CustomError() {}
 
@@ -2012,7 +2083,6 @@ describe('Queue', function() {
       var start;
       queue.isReady().then(function() {
         queue.process(function(job, jobDone) {
-
           if (job.data.ids.length > 2) {
             var err = new CustomError('Some ids could not be processed');
             err.failedIds = [1, 2];
